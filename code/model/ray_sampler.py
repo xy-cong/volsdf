@@ -13,19 +13,27 @@ class RaySampler(metaclass=abc.ABCMeta):
         pass
 
 class UniformSampler(RaySampler):
-    def __init__(self, scene_bounding_sphere, near, N_samples, take_sphere_intersection=False, far=-1):
+    def __init__(self, scene_bounding_sphere, near, N_samples, take_sphere_intersection=False, far=-1,
+                 sdf_threshold=5.0e-5, sphere_tracing_iters=0.5, line_step_iters=1, line_search_step=10):
         super().__init__(near, 2.0 * scene_bounding_sphere if far == -1 else far)  # default far is 2*R
         self.N_samples = N_samples
         self.scene_bounding_sphere = scene_bounding_sphere
         self.take_sphere_intersection = take_sphere_intersection
+        
+        self.sdf_threshold = sdf_threshold
+        self.sphere_tracing_iters = sphere_tracing_iters
+        self.line_step_iters = line_step_iters
+        self.line_search_step = line_search_step
 
     def get_z_vals(self, ray_dirs, cam_loc, model):
         if not self.take_sphere_intersection:
             near, far = self.near * torch.ones(ray_dirs.shape[0], 1).cuda(), self.far * torch.ones(ray_dirs.shape[0], 1).cuda()
         else:
             sphere_intersections = rend_util.get_sphere_intersections(cam_loc, ray_dirs, r=self.scene_bounding_sphere)
+            self.far = self.sphere_tracing()
+            far = self.far
             near = self.near * torch.ones(ray_dirs.shape[0], 1).cuda()
-            far = sphere_intersections[:,1:]
+            # far = sphere_intersections[:,1:]
 
         t_vals = torch.linspace(0., 1., steps=self.N_samples).cuda()
         z_vals = near * (1. - t_vals) + far * (t_vals)
@@ -41,17 +49,86 @@ class UniformSampler(RaySampler):
             z_vals = lower + (upper - lower) * t_rand
 
         return z_vals
+    
+    def sphere_tracing(self, batch_size, num_pixels, sdf, cam_loc, ray_directions, sphere_intersections):
+            #     curr_start_points, unfinished_mask_start, acc_start_dis, acc_end_dis, min_dis, max_dis = \
+            # self.sphere_tracing(batch_size, num_pixels, sdf, cam_loc, ray_directions, mask_intersect, sphere_intersections)
+        ''' Run sphere tracing algorithm for max iterations from both sides of unit sphere intersection '''
 
+        sphere_intersections_points = cam_loc.reshape(batch_size, 1, 1, 3) + sphere_intersections.unsqueeze(-1) * ray_directions.unsqueeze(2)
+
+        # Initialize start current points
+        curr_start_points = torch.zeros(batch_size * num_pixels, 3).cuda().float()
+        curr_start_points = sphere_intersections_points[:,:,0,:].reshape(-1,3)
+        acc_start_dis = torch.zeros(batch_size * num_pixels).cuda().float()
+        acc_start_dis = sphere_intersections.reshape(-1,2)[:,0]
+
+        # Initizliae min and max depth
+        min_dis = acc_start_dis.clone()
+
+        # Iterate on the rays (from both sides) till finding a surface
+        iters = 0
+
+        next_sdf_start = torch.zeros_like(acc_start_dis).cuda()
+        next_sdf_start = sdf(curr_start_points)
+
+
+        while True:
+            # Update sdf
+            curr_sdf_start = torch.zeros_like(acc_start_dis).cuda()
+            curr_sdf_start = next_sdf_start
+            curr_sdf_start[curr_sdf_start <= self.sdf_threshold] = 0
+
+            # Update masks
+            unfinished_mask_start = curr_sdf_start > self.sdf_threshold
+
+            if unfinished_mask_start.sum() == 0 or iters == self.sphere_tracing_iters:
+                break
+            iters += 1
+
+            # Make step
+            # Update distance
+            acc_start_dis = acc_start_dis + curr_sdf_start
+
+            # Update points
+            curr_start_points = (cam_loc.unsqueeze(1) + acc_start_dis.reshape(batch_size, num_pixels, 1) * ray_directions).reshape(-1, 3)
+
+            # Fix points which wrongly crossed the surface
+            next_sdf_start = torch.zeros_like(acc_start_dis).cuda()
+            next_sdf_start[unfinished_mask_start] = sdf(curr_start_points[unfinished_mask_start])
+
+            not_projected_start = next_sdf_start < 0
+            not_proj_iters = 0
+            while not_projected_start.sum() > 0 and not_proj_iters < self.line_step_iters:
+                # Step backwards
+                acc_start_dis[not_projected_start] -= ((1 - self.line_search_step) / (2 ** not_proj_iters)) * curr_sdf_start[not_projected_start]
+                curr_start_points[not_projected_start] = (cam_loc.unsqueeze(1) + acc_start_dis.reshape(batch_size, num_pixels, 1) * ray_directions).reshape(-1, 3)[not_projected_start]
+
+                # Calc sdf
+                next_sdf_start[not_projected_start] = sdf(curr_start_points[not_projected_start])
+
+                # Update mask
+                not_projected_start = next_sdf_start < 0
+                not_proj_iters += 1
+
+            unfinished_mask_start = unfinished_mask_start & (acc_start_dis)
+        # curr_start_points, unfinished_mask_start, min_dis先不返回
+        return acc_start_dis
 
 class ErrorBoundSampler(RaySampler):
     def __init__(self, scene_bounding_sphere, near, N_samples, N_samples_eval, N_samples_extra,
                  eps, beta_iters, max_total_iters,
-                 inverse_sphere_bg=False, N_samples_inverse_sphere=0, add_tiny=0.0):
+                 inverse_sphere_bg=False, N_samples_inverse_sphere=0, add_tiny=0.0,
+                 sdf_threshold=5.0e-5, line_search_step=0.5, line_step_iters=1, sphere_tracing_iters=10):
         super().__init__(near, 2.0 * scene_bounding_sphere)
         self.N_samples = N_samples
         self.N_samples_eval = N_samples_eval
-        self.uniform_sampler = UniformSampler(scene_bounding_sphere, near, N_samples_eval, take_sphere_intersection=inverse_sphere_bg)
-
+        
+        self.sdf_threshold = sdf_threshold
+        self.sphere_tracing_iters = sphere_tracing_iters
+        self.line_step_iters = line_step_iters
+        self.line_search_step = line_search_step
+        
         self.N_samples_extra = N_samples_extra
 
         self.eps = eps
@@ -59,25 +136,126 @@ class ErrorBoundSampler(RaySampler):
         self.max_total_iters = max_total_iters
         self.scene_bounding_sphere = scene_bounding_sphere
         self.add_tiny = add_tiny
-
+    
         self.inverse_sphere_bg = inverse_sphere_bg
         if inverse_sphere_bg:
-            self.inverse_sphere_sampler = UniformSampler(1.0, 0.0, N_samples_inverse_sphere, False, far=1.0)
+            self.inverse_sphere_sampler = UniformSampler(1.0, 0.0, N_samples_inverse_sphere, False, far=1.0,
+                                                         sdf_threshold=sdf_threshold, sphere_tracing_iters=sphere_tracing_iters,
+                                                         line_search_step=line_search_step, line_step_iters=line_step_iters)
 
     def get_z_vals(self, ray_dirs, cam_loc, model):
+        ior_0 = 1
+        ior_1 = 1.3
+        
+        cam_loc_list = []
+        ray_dirs_list = []
+        
+        ret_dict = {}
+        
         beta0 = model.density.get_beta().detach()
 
         # Start with uniform sampling
-        z_vals = self.uniform_sampler.get_z_vals(ray_dirs, cam_loc, model)
-        samples, samples_idx = z_vals, None
-
+        # 第一个段:
+        cam_loc_list.append(cam_loc)
+        ray_dirs_list.append(ray_dirs)
+        self.uniform_sampler = UniformSampler(self.scene_bounding_sphere, self.near, self.N_samples_eval, take_sphere_intersection=self.inverse_sphere_bg,
+                                              sdf_threshold=self.sdf_threshold, sphere_tracing_iters=self.sphere_tracing_iters,
+                                              line_search_step=self.line_search_step, line_step_iters=self.line_step_iters)
+        z_vals = self.uniform_sampler.get_z_vals(ray_dirs_list[-1], cam_loc_list[-1], model)
+        z_intersection = self.uniform_sampler.far
+        # samples, samples_idx = z_vals, None
         # Get maximum beta from the upper bound (Lemma 2)
         dists = z_vals[:, 1:] - z_vals[:, :-1]
         bound = (1.0 / (4.0 * torch.log(torch.tensor(self.eps + 1.0)))) * (dists ** 2.).sum(-1)
         beta = torch.sqrt(bound)
 
-        total_iters, not_converge = 0, True
+        ret_dict_1 = self.Algorithm(cam_loc_list[-1], ray_dirs_list[-1], model, z_vals, beta, beta0)
+        # 第一次入射, 改变方向
+        intersection = rend_util.get_points(cam_loc=cam_loc_list[-1], ray_dirs=ray_dirs_list[-1], z_vals=z_intersection)
+        points = rend_util.get_points(cam_loc=cam_loc_list[-1], z_vals=ret_dict_1["z_vals"], ray_dirs=ray_dirs_list[-1])
+        points_flat = points.reshape(-1, 3)
+        gradients = model.implicit_network.gradient(points_flat)
+        gradients = gradients.detach()
+        normals = gradients / gradients.norm(2, -1, keepdim=True)
+        normals = normals.reshape(points.shape)
+        
+        refract_dir, _ = rend_util.refract(ray_in=ray_dirs_list[-1], normal=normals, ior_0=ior_0, ior_1=ior_1)
+        
+        # 第二个段:
+        cam_loc_list.append(intersection)
+        ray_dirs_list.append(refract_dir)
+        self.uniform_sampler = UniformSampler(self.scene_bounding_sphere, self.near, self.N_samples_eval, take_sphere_intersection=self.inverse_sphere_bg,
+                                              sdf_threshold=self.sdf_threshold, sphere_tracing_iters=self.sphere_tracing_iters,
+                                              line_search_step=self.line_search_step, line_step_iters=self.line_step_iters)
+        z_vals = self.uniform_sampler.get_z_vals(ray_dirs_list[-1], cam_loc_list[-1], model)
+        z_intersection = self.uniform_sampler.far
+        dists = z_vals[:, 1:] - z_vals[:, :-1]
+        bound = (1.0 / (4.0 * torch.log(torch.tensor(self.eps + 1.0)))) * (dists ** 2.).sum(-1)
+        beta = torch.sqrt(bound)
 
+        ret_dict_2 = self.Algorithm(cam_loc_list[-1], ray_dirs_list[-1], model, z_vals, beta, beta0)
+        # 第二次入射, 改变方向
+        intersection = rend_util.get_points(cam_loc=cam_loc_list[-1], ray_dirs=ray_dirs_list[-1], z_vals=z_intersection)
+        points = rend_util.get_points(cam_loc=cam_loc_list[-1], z_vals=ret_dict_2["z_vals"], ray_dirs=ray_dirs_list[-1])
+        points_flat = points.reshape(-1, 3)
+        gradients = model.implicit_network.gradient(points_flat)
+        gradients = gradients.detach()
+        normals = gradients / gradients.norm(2, -1, keepdim=True)
+        normals = normals.reshape(points.shape)
+        normas = - normals
+        
+        refract_dir, mask = rend_util.refract(ray_in=ray_dirs_list[-1], normal=normals, ior_0=ior_0, ior_1=ior_1)
+        
+        # 第三个段:
+        cam_loc_list.append(intersection)
+        ray_dirs_list.append(refract_dir)
+        self.uniform_sampler = UniformSampler(self.scene_bounding_sphere, self.near, self.N_samples_eval, take_sphere_intersection=self.inverse_sphere_bg,
+                                              sdf_threshold=self.sdf_threshold, sphere_tracing_iters=self.sphere_tracing_iters,
+                                              line_search_step=self.line_search_step, line_step_iters=self.line_step_iters)
+        z_vals = self.uniform_sampler.get_z_vals(ray_dirs_list[-1][mask], cam_loc_list[-1][mask], model)
+        z_intersection = self.uniform_sampler.far
+        dists = z_vals[:, 1:] - z_vals[:, :-1]
+        bound = (1.0 / (4.0 * torch.log(torch.tensor(self.eps + 1.0)))) * (dists ** 2.).sum(-1)
+        beta = torch.sqrt(bound)
+
+        ret_dict_3 = self.Algorithm(cam_loc_list[-1][mask], ray_dirs_list[-1][mask], model, z_vals, beta, beta0)
+        
+        if self.inverse_sphere_bg:
+            z_vals_inverse_sphere = self.inverse_sphere_sampler.get_z_vals(ray_dirs, cam_loc, model)
+            z_vals_inverse_sphere = z_vals_inverse_sphere * (1./self.scene_bounding_sphere)
+            # z_vals = (z_vals, z_vals_inverse_sphere)
+    
+        ret_dict = {
+            "1": {
+                "cam_loc": cam_loc_list[0],
+                "ray_dirs": ray_dirs_list[0],
+                "z_vals": ret_dict_1["z_vals"],
+                "z_samples_eik": ret_dict_1["z_samples_eik"]
+            },
+            "2": {
+                "cam_loc": cam_loc_list[1],
+                "ray_dirs": ray_dirs_list[1],
+                "z_vals": ret_dict_2["z_vals"],
+                "z_samples_eik": ret_dict_2["z_samples_eik"]     
+            },
+            "3": {
+                "cam_loc": cam_loc_list[2],
+                "ray_dirs": ray_dirs_list[2],
+                "z_vals": ret_dict_3["z_vals"],
+                "z_samples_eik": ret_dict_3["z_samples_eik"]     
+            },
+            "bg": {
+                "z_vals": z_vals_inverse_sphere
+            },
+            "mask": mask
+        }
+
+        return ret_dict
+
+    def Algorithm(self, cam_loc, ray_dirs, model, z_vals, beta, beta0):
+        total_iters, not_converge = 0, True
+        samples = z_vals
+        samples_idx = None
         # Algorithm 1
         while not_converge and total_iters < self.max_total_iters:
             points = cam_loc.unsqueeze(1) + samples.unsqueeze(2) * ray_dirs.unsqueeze(1)
@@ -189,8 +367,8 @@ class ErrorBoundSampler(RaySampler):
             # Adding samples if we not converged
             if not_converge and total_iters < self.max_total_iters:
                 z_vals, samples_idx = torch.sort(torch.cat([z_vals, samples], -1), -1)
-
-
+                
+        # z_vals_ret = z_vals
         z_samples = samples
 
         near, far = self.near * torch.ones(ray_dirs.shape[0], 1).cuda(), self.far * torch.ones(ray_dirs.shape[0],1).cuda()
@@ -211,14 +389,15 @@ class ErrorBoundSampler(RaySampler):
         # add some of the near surface points
         idx = torch.randint(z_vals.shape[-1], (z_vals.shape[0],)).cuda()
         z_samples_eik = torch.gather(z_vals, 1, idx.unsqueeze(-1))
-
-        if self.inverse_sphere_bg:
-            z_vals_inverse_sphere = self.inverse_sphere_sampler.get_z_vals(ray_dirs, cam_loc, model)
-            z_vals_inverse_sphere = z_vals_inverse_sphere * (1./self.scene_bounding_sphere)
-            z_vals = (z_vals, z_vals_inverse_sphere)
-
-        return z_vals, z_samples_eik
-
+        
+        ret_dict = {
+            "z_vals": z_vals,
+            "z_samples_eik": z_samples_eik
+        }
+        
+        return ret_dict
+        
+    
     def get_error_bound(self, beta, model, sdf, z_vals, dists, d_star):
         density = model.density(sdf.reshape(z_vals.shape), beta=beta)
         shifted_free_energy = torch.cat([torch.zeros(dists.shape[0], 1).cuda(), dists * density[:, :-1]], dim=-1)

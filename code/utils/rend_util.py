@@ -167,3 +167,28 @@ def get_sphere_intersections(cam_loc, ray_directions, r = 1.0):
     sphere_intersections = sphere_intersections.clamp_min(0.0)
 
     return sphere_intersections
+
+def get_points(cam_loc, z_vals, ray_dirs):
+    points = cam_loc.unsqueeze(1) + z_vals.unsqueeze(2) * ray_dirs.unsqueeze(1)
+    return points
+
+def refract(ray_in, normal, ior_0, ior_1):
+    """
+    in: 入射光线
+    normal: 法向量
+    ior_0: 入射那边的ior
+    ior_1: 折射那边的ior
+    """
+    L_dir = - ray_in
+    assert ior_0 != 0 and ior_1 != 0
+    ior_0_over_1 = ior_0 / ior_1
+    v_t = torch.bmm(L_dir.view(-1, 1, 3), normal.view(-1, 3, 1)).squeeze(-1)
+    under = 1 - (ior_0_over_1**2) * ( 1 - v_t ** 2)
+    
+    mask = under >= 0
+    # True: 能过去
+    # False: 全反
+    refract_dir = ior_0_over_1 * ( v_t * normal - L_dir) - torch.sqrt(under) * normal
+    return refract_dir, mask
+    
+    
