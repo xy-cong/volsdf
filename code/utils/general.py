@@ -26,11 +26,10 @@ def split_input(model_input, total_pixels, n_pixels=10000):
      Can decrease the value of n_pixels in case of cuda out of memory error.
      '''
     split = []
+    # n_pixels = 10
     for i, indx in enumerate(torch.split(torch.arange(total_pixels).cuda(), n_pixels, dim=0)):
         data = model_input.copy()
         data['uv'] = torch.index_select(model_input['uv'], 1, indx)
-        if 'object_mask' in data:
-            data['object_mask'] = torch.index_select(model_input['object_mask'], 1, indx)
         split.append(data)
     return split
 

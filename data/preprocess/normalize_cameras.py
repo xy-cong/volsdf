@@ -2,8 +2,9 @@ import cv2
 import numpy as np
 import argparse
 
-
+ 
 def get_center_point(num_cams,cameras):
+    import ipdb; ipdb.set_trace()
     A = np.zeros((3 * num_cams, 3 + num_cams))
     b = np.zeros((3 * num_cams, 1))
     camera_centers=np.zeros((3,num_cams))
@@ -13,11 +14,9 @@ def get_center_point(num_cams,cameras):
         K = cv2.decomposeProjectionMatrix(P0)[0]
         R = cv2.decomposeProjectionMatrix(P0)[1]
         c = cv2.decomposeProjectionMatrix(P0)[2]
+        # K, R, c = cv2.decomposeProjectionMatrix(P0)
         c = c / c[3]
         camera_centers[:,i]=c[:3].flatten()
-
-        v = np.linalg.inv(K) @ np.array([800, 600, 1])
-        v = v / np.linalg.norm(v)
 
         v=R[2,:]
         A[3 * i:(3 * i + 3), :3] = np.eye(3)
@@ -30,12 +29,14 @@ def get_center_point(num_cams,cameras):
 
 def normalize_cameras(original_cameras_filename,output_cameras_filename,num_of_cameras):
     cameras = np.load(original_cameras_filename)
+    import ipdb; ipdb.set_trace()
     if num_of_cameras==-1:
-        all_files=cameras.files
-        maximal_ind=0
-        for field in all_files:
-            maximal_ind=np.maximum(maximal_ind,int(field.split('_')[-1]))
-        num_of_cameras=maximal_ind+1
+        # all_files=cameras.files
+        # maximal_ind=0
+        # for field in all_files:
+        #     maximal_ind=np.maximum(maximal_ind,int(field.split('_')[-1]))
+        # num_of_cameras=maximal_ind+1
+        num_of_cameras = len(cameras.files) // 2
     soll, camera_centers = get_center_point(num_of_cameras, cameras)
 
     center = soll[:3].flatten()

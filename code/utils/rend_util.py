@@ -176,9 +176,11 @@ def refract(ray_in, normal, ior_0, ior_1):
     """
     in: 入射光线
     normal: 法向量
-    ior_0: 入射那边的ior
+    ior_0: 入射那边的ior 
     ior_1: 折射那边的ior
     """
+    # import ipdb; ipdb.set_trace()
+    normal = normal.reshape(-1, 3)
     L_dir = - ray_in
     assert ior_0 != 0 and ior_1 != 0
     ior_0_over_1 = ior_0 / ior_1
@@ -189,6 +191,8 @@ def refract(ray_in, normal, ior_0, ior_1):
     # True: 能过去
     # False: 全反
     refract_dir = ior_0_over_1 * ( v_t * normal - L_dir) - torch.sqrt(under) * normal
+    
+    refract_dir = F.normalize(refract_dir, dim=1)
     return refract_dir, mask
     
     

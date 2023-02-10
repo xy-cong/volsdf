@@ -6,15 +6,16 @@ import utils.general as utils
 from utils import rend_util
 from model.network import ImplicitNetwork, RenderingNetwork
 from model.density import LaplaceDensity, AbsDensity
-from model.ray_sampler import ErrorBoundSampler
+# from model.ray_sampler import ErrorBoundSampler
+from model.my_ray_sampler import ErrorBoundSampler
 
 
-# 
-# For modeling more complex backgrounds, we follow the inverted sphere parametrization from NeRF++ 
-# https://github.com/Kai-46/nerfplusplus 
-# 
+"""
+For modeling more complex backgrounds, we follow the inverted sphere parametrization from NeRF++ 
+https://github.com/Kai-46/nerfplusplus 
+"""
 
- 
+
 class VolSDFNetworkBG(nn.Module):
     def __init__(self, conf):
         super().__init__()
@@ -43,33 +44,88 @@ class VolSDFNetworkBG(nn.Module):
         ray_dirs, cam_loc = rend_util.get_camera_params(uv, pose, intrinsics)
 
         batch_size, num_pixels, _ = ray_dirs.shape
-
+        # import ipdb; ipdb.set_trace()
         cam_loc = cam_loc.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, 3)
         ray_dirs = ray_dirs.reshape(-1, 3)
 
-        z_vals, z_samples_eik = self.ray_sampler.get_z_vals(ray_dirs, cam_loc, self)
-
-        z_vals, z_vals_bg = z_vals
-        z_max = z_vals[:,-1]
-        z_vals = z_vals[:,:-1]
-        N_samples = z_vals.shape[1] 
-
-        points = cam_loc.unsqueeze(1) + z_vals.unsqueeze(2) * ray_dirs.unsqueeze(1)
-        points_flat = points.reshape(-1, 3)
-
-        dirs = ray_dirs.unsqueeze(1).repeat(1,N_samples,1)
-        dirs_flat = dirs.reshape(-1, 3)
+        z_ret = self.ray_sampler.get_z_vals(ray_dirs, cam_loc, self)
         
-        sdf, feature_vectors, gradients = self.implicit_network.get_outputs(points_flat)
-
-        rgb_flat = self.rendering_network(points_flat, gradients, dirs_flat, feature_vectors)
+        points_1 = rend_util.get_points(z_ret["1"]["cam_loc"], z_ret["1"]["z_vals"], z_ret["1"]["ray_dirs"])
+        points_2 = rend_util.get_points(z_ret["2"]["cam_loc"], z_ret["2"]["z_vals"], z_ret["2"]["ray_dirs"])
+        points_3 = rend_util.get_points(z_ret["3"]["cam_loc"], z_ret["3"]["z_vals"], z_ret["3"]["ray_dirs"])
+        
+        mask = z_ret["mask"]
+        N_rays = mask.shape[0]
+        
+        points_long = torch.cat([points_1[mask], points_2[mask], points_3[mask]], 1)
+        points_long_flat = points_long.reshape(-1, 3)
+        
+        N_samples = z_ret["1"]["z_vals"].shape[1]
+        
+        dirs_long = torch.cat([z_ret["1"]["ray_dirs"][mask].unsqueeze(1).repeat(1, N_samples,1), 
+                               z_ret["2"]["ray_dirs"][mask].unsqueeze(1).repeat(1, N_samples,1), 
+                               z_ret["3"]["ray_dirs"].unsqueeze(1).repeat(1, N_samples,1)], 1)
+        dirs_long_flat = dirs_long.reshape(-1, 3)
+        
+        z_max_1 = z_ret["1"]["z_vals"][:, -1]
+        z_max_2 = z_ret["2"]["z_vals"][:, -1]
+        z_max_3 = z_ret["3"]["z_vals"][:, -1]
+        
+        z_vals_long = torch.cat([z_ret["1"]["z_vals"][mask], 
+                               z_ret["2"]["z_vals"][mask] + z_max_1[mask], 
+                               z_ret["3"]["z_vals"] + z_max_1[mask] + z_max_2[mask]], 1)
+        
+        # long
+        sdf, feature_vectors, gradients = self.implicit_network.get_outputs(points_long_flat)
+        rgb_flat = self.rendering_network(points_long_flat, gradients, dirs_long_flat, feature_vectors)
         rgb = rgb_flat.reshape(-1, N_samples, 3)
+        
+        z_max = z_max_1[mask] + z_max_2[mask] + z_max_3
+        weights, bg_transmittance = self.volume_rendering(z_vals_long, z_max, sdf)
+        fg_long_rgb_values = torch.sum(weights.unsqueeze(-1) * rgb, 1)
+        
+        # short
+        mask = ~mask
+        points_short = torch.cat([points_1[mask], points_2[mask]], 1)
+        points_short_flat = points_long.reshape(-1, 3)
+        dirs_long = torch.cat([z_ret["1"]["ray_dirs"][mask].unsqueeze(1).repeat(1, N_samples,1), 
+                               z_ret["2"]["ray_dirs"][mask].unsqueeze(1).repeat(1, N_samples,1)], 1)
+        dirs_long_flat = dirs_long.reshape(-1, 3)
+        z_vals_long = torch.cat([z_ret["1"]["z_vals"][mask], 
+                               z_ret["2"]["z_vals"][mask] + z_max_1[mask]], 1)
+        sdf, feature_vectors, gradients = self.implicit_network.get_outputs(points_short)
+        rgb_flat = self.rendering_network(points_short_flat, gradients, dirs_long_flat, feature_vectors)
+        rgb = rgb_flat.reshape(-1, N_samples, 3)
+        
+        z_max = z_max_1[mask] + z_max_2[mask]
+        weights, bg_transmittance = self.volume_rendering(z_vals_long, z_max, sdf)
+        fg_short_rgb_values = torch.sum(weights.unsqueeze(-1) * rgb, 1)
+        
+        fg_rgb_values = torch.zeros([N_rays, 3])
+        fg_rgb_values[mask] = fg_short_rgb_values
+        fg_rgb_values[~mask] = fg_long_rgb_values
+        
+        # z_vals, z_vals_bg = z_vals
+        # z_max = z_vals[:,-1]
+        # z_vals = z_vals[:,:-1]
+        # N_samples = z_vals.shape[1]
 
-        weights, bg_transmittance = self.volume_rendering(z_vals, z_max, sdf)
+        # points = cam_loc.unsqueeze(1) + z_vals.unsqueeze(2) * ray_dirs.unsqueeze(1)
+        # points_flat = points.reshape(-1, 3)
 
-        fg_rgb_values = torch.sum(weights.unsqueeze(-1) * rgb, 1)
+        # dirs = ray_dirs.unsqueeze(1).repeat(1,N_samples,1)
+        # dirs_flat = dirs.reshape(-1, 3)
 
+        # sdf, feature_vectors, gradients = self.implicit_network.get_outputs(points_flat)
 
+        # rgb_flat = self.rendering_network(points_flat, gradients, dirs_flat, feature_vectors)
+        # rgb = rgb_flat.reshape(-1, N_samples, 3)
+
+        # weights, bg_transmittance = self.volume_rendering(z_vals, z_max, sdf)
+
+        # fg_rgb_values = torch.sum(weights.unsqueeze(-1) * rgb, 1)
+
+        z_vals_bg = z_ret["bg"]["z_vals"]
         # Background rendering
         N_bg_samples = z_vals_bg.shape[1]
         z_vals_bg = torch.flip(z_vals_bg, dims=[-1, ])  # 1--->0
@@ -106,7 +162,12 @@ class VolSDFNetworkBG(nn.Module):
             eikonal_points = torch.empty(n_eik_points, 3).uniform_(-self.scene_bounding_sphere, self.scene_bounding_sphere).cuda()
 
             # add some of the near surface points
-            eik_near_points = (cam_loc.unsqueeze(1) + z_samples_eik.unsqueeze(2) * ray_dirs.unsqueeze(1)).reshape(-1, 3)
+            # eik_near_points = (cam_loc.unsqueeze(1) + z_samples_eik.unsqueeze(2) * ray_dirs.unsqueeze(1)).reshape(-1, 3)
+            eik_near_points_1 = rend_util.get_points(z_ret["1"]["cam_loc"], z_ret["1"]["z_samples_eik"], z_ret["1"]["ray_dirs"])
+            eik_near_points_2 = rend_util.get_points(z_ret["2"]["cam_loc"], z_ret["2"]["z_samples_eik"], z_ret["2"]["ray_dirs"])
+            eik_near_points_3 = rend_util.get_points(z_ret["3"]["cam_loc"], z_ret["3"]["z_samples_eik"], z_ret["3"]["ray_dirs"])
+            
+            eik_near_points = torch.cat([eik_near_points_1, eik_near_points_2, eik_near_points_3], 0)
             eikonal_points = torch.cat([eikonal_points, eik_near_points], 0)
 
             grad_theta = self.implicit_network.gradient(eikonal_points)
@@ -186,4 +247,3 @@ class VolSDFNetworkBG(nn.Module):
         pts = torch.cat((p_sphere_new, depth.unsqueeze(-1)), dim=-1)
 
         return pts
-    

@@ -43,7 +43,7 @@ class ImplicitNetwork(nn.Module):
                 out_dim = dims[l + 1]
 
             lin = nn.Linear(dims[l], out_dim)
-
+            # import ipdb; ipdb.set_trace()
             if geometric_init:
                 if l == self.num_layers - 2:
                     torch.nn.init.normal_(lin.weight, mean=np.sqrt(np.pi) / np.sqrt(dims[l]), std=0.0001)
@@ -99,7 +99,7 @@ class ImplicitNetwork(nn.Module):
             only_inputs=True)[0]
         return gradients
 
-    def get_outputs(self, x):
+    def get_outputs(self, x): 
         x.requires_grad_(True)
         output = self.forward(x)
         sdf = output[:,:1]
