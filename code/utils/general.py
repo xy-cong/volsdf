@@ -3,7 +3,7 @@ from glob import glob
 import torch
 
 def mkdir_ifnotexists(directory):
-    if not os.path.exists(directory):
+    if not os.path.exists(directory): 
         os.mkdir(directory)
 
 def get_class(kls):
@@ -19,6 +19,12 @@ def glob_imgs(path):
     for ext in ['*.png', '*.jpg', '*.JPEG', '*.JPG']:
         imgs.extend(glob(os.path.join(path, ext)))
     return imgs
+
+def glob_par(path, suffix):
+    ret = []
+    for ext in suffix:
+        ret.extend(glob(os.path.join(path, ext)))
+    return ret    
 
 def split_input(model_input, total_pixels, n_pixels=10000):
     '''
@@ -51,3 +57,32 @@ def merge_output(res, total_pixels, batch_size):
 
 def concat_home_dir(path):
     return os.path.join(os.environ['HOME'],'data',path)
+
+
+def convert_matrix_world_to_RT(matrix_world):
+    # bcam stands for blender camera
+    import numpy as np
+    R_bcam2cv = np.array([[1, 0,  0],
+                          [0, -1, 0],
+                          [0, 0, -1]])
+
+    location = matrix_world[:3, 3]
+    R_world2bcam = matrix_world[:3, :3].T
+
+    # Convert camera location to translation vector used in coordinate changes
+    # Use location from matrix_world to account for constraints:
+    T_world2bcam = -1 * R_world2bcam @ location
+
+    # Build the coordinate transform matrix from world to computer vision
+    # camera
+    R_world2cv = R_bcam2cv @ R_world2bcam
+    T_world2cv = R_bcam2cv @ T_world2bcam
+
+    # put into 3x4 matrix
+    # RT = np.zeros((3, 4))
+    
+    RT = np.eye(4)
+    RT[:3, :3] = R_world2cv
+    RT[:3,  3] = T_world2cv
+
+    return RT

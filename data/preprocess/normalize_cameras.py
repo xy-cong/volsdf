@@ -4,7 +4,7 @@ import argparse
 
  
 def get_center_point(num_cams,cameras):
-    import ipdb; ipdb.set_trace()
+    # import ipdb; ipdb.set_trace()
     A = np.zeros((3 * num_cams, 3 + num_cams))
     b = np.zeros((3 * num_cams, 1))
     camera_centers=np.zeros((3,num_cams))
@@ -29,7 +29,7 @@ def get_center_point(num_cams,cameras):
 
 def normalize_cameras(original_cameras_filename,output_cameras_filename,num_of_cameras):
     cameras = np.load(original_cameras_filename)
-    import ipdb; ipdb.set_trace()
+    # import ipdb; ipdb.set_trace()
     if num_of_cameras==-1:
         # all_files=cameras.files
         # maximal_ind=0

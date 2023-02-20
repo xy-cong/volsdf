@@ -161,6 +161,7 @@ def get_sphere_intersections(cam_loc, ray_directions, r = 1.0):
     # sanity check
     if (under_sqrt <= 0).sum() > 0:
         print('BOUNDING SPHERE PROBLEM!')
+        print(cam_loc[under_sqrt<=0], ray_directions[under_sqrt<=0])
         exit()
 
     sphere_intersections = torch.sqrt(under_sqrt) * torch.Tensor([-1, 1]).cuda().float() - ray_cam_dot

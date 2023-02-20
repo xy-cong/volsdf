@@ -18,6 +18,29 @@ import utils.general as utils
 import utils.plots as plt
 from utils import rend_util
 
+def pose_cvt(T_cv, scale=1):
+    """
+    Convert transformation from CV representation
+    Input: 4x4 Transformation matrix
+    Output: 4x4 Converted transformation matrix
+    """
+    R = T_cv[:3, :3]
+    t = T_cv[:3, 3]
+
+    R_rot = np.eye(3)
+    R_rot[1, 1] = -1
+    R_rot[2, 2] = -1
+
+    R = np.matmul(R_rot, R)
+    t = np.matmul(R_rot, t)
+
+    t *= scale
+
+    T_cg = np.eye(4)
+    T_cg[:3, :3] = R
+    T_cg[:3, 3] = t
+    return T_cg
+
 trans_t = lambda t : torch.Tensor([
     [1,0,0,0],
     [0,1,0,0],
@@ -73,7 +96,7 @@ def evaluate(**kwargs):
     render_video = kwargs['render_video']
 
     expname = conf.get_string('train.expname') + kwargs['expname']
-    
+    # import ipdb; ipdb.set_trace()
     if kwargs['timestamp'] == 'latest':
         if os.path.exists(os.path.join('../', kwargs['exps_folder_name'], expname)):
             timestamps = os.listdir(os.path.join('../', kwargs['exps_folder_name'], expname))
@@ -107,8 +130,8 @@ def evaluate(**kwargs):
     model = utils.get_class(conf.get_string('train.model_class'))(conf=conf_model)
     if torch.cuda.is_available():
         model.cuda()
-    import ipdb; ipdb.set_trace()
-
+    # import ipdb; ipdb.set_trace()
+ 
     if eval_rendering:
         eval_dataloader = torch.utils.data.DataLoader(eval_dataset,
                                                       batch_size=1,
@@ -120,10 +143,11 @@ def evaluate(**kwargs):
         split_n_pixels = conf.get_int('train.split_n_pixels', 10000)
 
     old_checkpnts_dir = os.path.join(expdir, timestamp, 'checkpoints')
-
+    print("old_checkpnts_dir", old_checkpnts_dir)
     saved_model_state = torch.load(os.path.join(old_checkpnts_dir, 'ModelParameters', str(kwargs['checkpoint']) + ".pth"))
     model.load_state_dict(saved_model_state["model_state_dict"])
     epoch = saved_model_state['epoch']
+    print("epoch: ", epoch)
 
     ####################################################################################################################
     print("evaluating...")
@@ -132,7 +156,22 @@ def evaluate(**kwargs):
     images_dir = '{0}/rendering_{1}'.format(evaldir, epoch)
     utils.mkdir_ifnotexists(images_dir)
     rgbs = []
-
+    
+    from wis3d import Wis3D
+    cameras_dir = "/mnt/data/cxy_colmap/volsdf/evals/cameras"
+    wis3d = Wis3D(cameras_dir, "test")
+    # wis3d.add_spheres(np.array([0, 0, 0]), 3, name='sphere0')
+    # wis3d.add_spheres(np.array([[0, 1, 0], [0, 0, 1]]), 0.5, name = 'sphere1')
+    # wis3d.add_spheres(np.array([[0, 1, 0], [0, 0, 1]]), np.array([0.25, 0.5]),np.array([[0, 255, 0], [0, 0, 255]]), name='sphere2')
+    print(len(eval_dataloader))
+    for data_index, (indices, model_input, ground_truth) in enumerate(eval_dataloader):
+        T = model_input["pose"].reshape(4,4)
+        # T = pose_cvt(T)
+        # print(T)
+        # T_inv = np.linalg.inv(T)
+        T_inv = T
+        wis3d.add_camera_trajectory(T_inv[None], name='poses{:0>3d}_'.format(data_index))
+    return 
     if render_video:
         print('RENDER VIDEO')
             # Default is smoother render_poses path
@@ -140,9 +179,9 @@ def evaluate(**kwargs):
         video_dir = '{0}/rendering_{1}'.format(evaldir, epoch)
         utils.mkdir_ifnotexists(video_dir)
 
-        interval = 40
-        render_poses = torch.stack([pose_spherical(angle, -30.0, 3.0) for angle in np.linspace(-180,180,interval+1)[:-1]], 0)
-        print('render_videos poses shape', render_poses.shape)
+        # interval = 40
+        # render_poses = torch.stack([pose_spherical(angle, -30.0, 3.0) for angle in np.linspace(-180,180,interval+1)[:-1]], 0)
+        # print('render_videos poses shape', render_poses.shape)
         
         # from mpl_toolkits.mplot3d import Axes3D  # 空间三维画图     
         # import matplotlib.pyplot as plt
@@ -203,23 +242,50 @@ def evaluate(**kwargs):
             img = imageio.imread(path)
             img = skimage.img_as_float32(img)
             rgbs.append(img)
-            
-        print('Done rendering', images_dir)
+        
         to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
         
-        imageio.mimwrite(os.path.join(images_dir, 'video.mp4'), to8b(rgbs), fps=12, quality=8)
+        imageio.mimwrite(os.path.join(images_dir, 'video.mp4'), to8b(rgbs), fps=5, quality=8)
+        print('Done rendering', images_dir)
 
         return
     
     
     if eval_rendering:
         # import ipdb; ipdb.set_trace()
-        psnrs = []
-        for data_index, (indices, model_input, ground_truth) in enumerate(eval_dataloader):
-            model_input["intrinsics"] = model_input["intrinsics"].cuda()
-            model_input["uv"] = model_input["uv"].cuda()
-            model_input['pose'] = model_input['pose'].cuda()
+        camera_path = "/mnt/data/cxy_colmap/volsdf/data/blender/camera_path"
+        intrinsics_folder = os.path.join(camera_path, "intrinsics")
+        pose_folder = os.path.join(camera_path, "pose")
+        intrinsics_path = utils.glob_par(intrinsics_folder, ['*.txt'])
+        pose_path = utils.glob_par(pose_folder, ['*.txt'])
+        intrinsics = []
+        pose = []
+        blender2opencv = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
+
+        for idx in range(len(intrinsics_path)):
+            uv = np.mgrid[0:img_res[0], 0:img_res[1]].astype(np.int32)
+            uv = torch.from_numpy(np.flip(uv, axis=0).copy()).float()
+            uv = uv.reshape(2, -1).transpose(1, 0).reshape(1, -1, 2)
             # import ipdb; ipdb.set_trace()
+            # for data_index, (indices, model_input, ground_truth) in enumerate(eval_dataloader):
+            #     model_input["intrinsics"] = model_input["intrinsics"].cuda()
+            #     model_input["uv"] = model_input["uv"].cuda()
+            #     model_input['pose'] = model_input['pose'].cuda()
+            intrinsics_file = open(intrinsics_path[idx])
+            pose_file = open(pose_path[idx])
+            intrin = intrinsics_file.readline().split(" ")
+            intrin = np.array([float(i) for i in intrin]).reshape(4,4)
+            p = pose_file.readline().split(" ")
+            p = np.array([float(i) for i in p]).reshape(4,4)
+            # P = intrin @ p
+            
+            RT = utils.convert_matrix_world_to_RT(p)
+            # import ipdb; ipdb.set_trace()
+            model_input = {}
+            model_input["intrinsics"] = torch.from_numpy(intrin.reshape(1,4,4)).float().cuda()
+            model_input["uv"] = uv.cuda()
+            model_input['pose'] = torch.from_numpy(RT.reshape(1,4,4)).float().cuda()
+            # split_n_pixels = 1
             split = utils.split_input(model_input, total_pixels, n_pixels=split_n_pixels)
             res = []
             for s in tqdm(split):
@@ -228,8 +294,8 @@ def evaluate(**kwargs):
                 res.append({
                     'rgb_values': out['rgb_values'].detach(),
                 })
-  
-            batch_size = ground_truth['rgb'].shape[0]
+            # batch_size = ground_truth['rgb'].shape[0]
+            batch_size = 1
             model_outputs = utils.merge_output(res, total_pixels, batch_size)
             rgb_eval = model_outputs['rgb_values']
             rgb_eval = rgb_eval.reshape(batch_size, total_pixels, 3)
@@ -237,21 +303,51 @@ def evaluate(**kwargs):
             rgb_eval = plt.lin2img(rgb_eval, img_res).detach().cpu().numpy()[0]
             rgb_eval = rgb_eval.transpose(1, 2, 0)
             img = Image.fromarray((rgb_eval * 255).astype(np.uint8))
-            img.save('{0}/eval_{1}.png'.format(images_dir,'%03d' % indices[0]))
+            img.save('{0}/eval_{1}.png'.format(images_dir,'%03d' % idx))
 
-            psnr = rend_util.get_psnr(model_outputs['rgb_values'],
-                                      ground_truth['rgb'].cuda().reshape(-1, 3)).item()
-            psnrs.append(psnr)
             rgbs.append(rgb_eval)
+            
+            # import ipdb; ipdb.set_trace()
+            
+        # import ipdb; ipdb.set_trace()
+        # psnrs = []
+        # for data_index, (indices, model_input, ground_truth) in enumerate(eval_dataloader):
+        #     model_input["intrinsics"] = model_input["intrinsics"].cuda()
+        #     model_input["uv"] = model_input["uv"].cuda()
+        #     model_input['pose'] = model_input['pose'].cuda()
+        #     # import ipdb; ipdb.set_trace()
+        #     split = utils.split_input(model_input, total_pixels, n_pixels=split_n_pixels)
+        #     res = []
+        #     for s in tqdm(split):
+        #         torch.cuda.empty_cache()
+        #         out = model(s)
+        #         res.append({
+        #             'rgb_values': out['rgb_values'].detach(),
+        #         })
+            
+        #     batch_size = ground_truth['rgb'].shape[0]
+        #     model_outputs = utils.merge_output(res, total_pixels, batch_size)
+        #     rgb_eval = model_outputs['rgb_values']
+        #     rgb_eval = rgb_eval.reshape(batch_size, total_pixels, 3)
+
+        #     rgb_eval = plt.lin2img(rgb_eval, img_res).detach().cpu().numpy()[0]
+        #     rgb_eval = rgb_eval.transpose(1, 2, 0)
+        #     img = Image.fromarray((rgb_eval * 255).astype(np.uint8))
+        #     img.save('{0}/eval_{1}.png'.format(images_dir,'%03d' % indices[0]))
+
+        #     psnr = rend_util.get_psnr(model_outputs['rgb_values'],
+        #                               ground_truth['rgb'].cuda().reshape(-1, 3)).item()
+        #     psnrs.append(psnr)
+        #     rgbs.append(rgb_eval)
         print('Done rendering', images_dir)
         to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
         
-        imageio.mimwrite(os.path.join(images_dir, 'video.mp4'), to8b(rgbs), fps=16, quality=8)
+        imageio.mimwrite(os.path.join(images_dir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
 
-        psnrs = np.array(psnrs).astype(np.float64)
-        print("RENDERING EVALUATION {2}: psnr mean = {0} ; psnr std = {1}".format("%.2f" % psnrs.mean(), "%.2f" % psnrs.std(), scan_id))
-        psnrs = np.concatenate([psnrs, psnrs.mean()[None], psnrs.std()[None]])
-        pd.DataFrame(psnrs).to_csv('{0}/psnr_{1}.csv'.format(evaldir, epoch))
+        # psnrs = np.array(psnrs).astype(np.float64)
+        # print("RENDERING EVALUATION {2}: psnr mean = {0} ; psnr std = {1}".format("%.2f" % psnrs.mean(), "%.2f" % psnrs.std(), scan_id))
+        # psnrs = np.concatenate([psnrs, psnrs.mean()[None], psnrs.std()[None]])
+        # pd.DataFrame(psnrs).to_csv('{0}/psnr_{1}.csv'.format(evaldir, epoch))
 
 
 
@@ -273,12 +369,12 @@ if __name__ == '__main__':
     opt = parser.parse_args()
 
     if opt.gpu == "auto":
-        deviceIDs = GPUtil.getAvailable(order='first', limit=4, maxLoad=0.5, maxMemory=0.5, includeNan=False, excludeID=[], excludeUUID=[])
+        deviceIDs = GPUtil.getAvailable(order='memory', limit=4, maxLoad=0.5, maxMemory=0.5, includeNan=False, excludeID=[], excludeUUID=[])
         """
         order 不同 limit?
         """
-        gpu = deviceIDs[1]
-        print(deviceIDs)
+        gpu = deviceIDs[0]
+        print("GPU: ", gpu)
     else:
         gpu = opt.gpu
 
@@ -295,4 +391,5 @@ if __name__ == '__main__':
              eval_rendering=opt.eval_rendering,
              render_video=opt.render_video
              )
+
 

@@ -9,6 +9,8 @@ import utils.general as utils
 import utils.plots as plt
 from utils import rend_util
 
+torch.autograd.set_detect_anomaly(True)
+
 class VolSDFTrainRunner():
     def __init__(self,**kwargs):
         torch.set_default_dtype(torch.float32)
@@ -24,6 +26,8 @@ class VolSDFTrainRunner():
         scan_id = kwargs['scan_id'] if kwargs['scan_id'] != -1 else self.conf.get_int('dataset.scan_id', default=-1)
         if scan_id != -1:
             self.expname = self.expname + '_{0}'.format(scan_id)
+            
+        # import ipdb; ipdb.set_trace()
 
         if kwargs['is_continue'] and kwargs['timestamp'] == 'latest':
             if os.path.exists(os.path.join('../',kwargs['exps_folder_name'],self.expname)):
@@ -159,6 +163,9 @@ class VolSDFTrainRunner():
 
     def run(self):
         print("training...")
+        
+        print(self.start_epoch)
+        # self.start_epoch = self.start_epoch + 1
 
         for epoch in range(self.start_epoch, self.nepochs + 1):
 
@@ -199,7 +206,7 @@ class VolSDFTrainRunner():
                 self.model.train()
 
             self.train_dataset.change_sampling_idx(self.num_pixels)
-
+            # import ipdb; ipdb.set_trace()
             for data_index, (indices, model_input, ground_truth) in enumerate(self.train_dataloader):
                 model_input["intrinsics"] = model_input["intrinsics"].cuda()
                 model_input["uv"] = model_input["uv"].cuda()
